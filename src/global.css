@@ -1,0 +1,17 @@
+:root {
+  --bg: #0b3f4d;
+  --bg-dark: #08323d;
+  --accent: #0fb0c0;
+  --accent-soft: #0aa0ae;
+  --text: #ffffff;
+  --muted: #cfe8ec;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, sans-serif;
+  background: #000;
+  display: flex;
+  justify-content: center;
+  padding: 2rem;
+}
