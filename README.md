@@ -298,3 +298,7 @@ Phase 0 is about \*\*learning what needs to exist\*\*, not building everything a
 
 ---
 
+\## Contracts
+
+See `CONTRACTS.md` for Phase 0 contracts and the canonical Name Card schema.
+
