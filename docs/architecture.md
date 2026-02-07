@@ -43,9 +43,8 @@ Abstract submission contract (not implemented yet):
 
 Runtime App deploys via GitHub Actions to:
 
-`https://<username>.github.io/TRU-Pronounce-/`
+`https://<username>.github.io/TRU-Pronounce/`
 
 Vite must use:
 
-`base: "/TRU-Pronounce-/"`
-
+`base: "/TRU-Pronounce/"`
