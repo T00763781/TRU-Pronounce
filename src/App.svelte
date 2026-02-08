@@ -1,580 +1,233 @@
 <script>
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onMount } from 'svelte'
+  import { listLocalVoices, speak } from './lib/speech.js'
+  import { generateChipsFromName, buildPayload } from './lib/mouthSoundMap.js'
 
-  const STORAGE_KEY = "tru-pronounce.phase0.lastConfig";
-  const playIconUrl = new URL("../play.svg", import.meta.url).href;
+  const LIB_BASE = import.meta.env.VITE_LIBRARY_BASE_URL || ''
 
-  let config = {
-    name: "Deiveek",
-    syllables: ["DAY", "vik"],
-    ipa: "ˈdeɪ.viːk",
-    guidance: "Like David with a “K” instead of “D”",
-    voiceId: null,
-  };
+  let name = 'Deiveek'
+  let status = ''
+  let voices = []
+  let selectedVoiceURI = ''
+  let selectedVoice = null
 
-  let lastTtsPayload = null;
+  let libraryIndex = null
+  let matches = []
+  let selectedCard = null
 
-  let ttsSupported = false;
-  let voicesLoading = true;
-  let voicesError = "";
-  let localVoices = [];
-  let localVoicesOpen = false;
+  let chips = []
+  let sayAs = ''
+  let hint = ''
 
-  let nameEl;
-  let ipaEl;
-  let guidanceEl;
-  let syllableEls = [];
-
-  function setSyllableEl(node, index) {
-    syllableEls[index] = node;
-
-    return {
-      destroy() {
-        if (syllableEls[index] === node) syllableEls[index] = null;
-      },
-    };
-  }
-
-  function cleanText(text) {
-    return (text ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
-  }
-
-  function bestEffortSyllables(name) {
-    const cleaned = cleanText(name);
-    if (!cleaned) return [""];
-
-    const wordParts = cleaned
-      .replace(/([a-z])([A-Z])/g, "$1 $2")
-      .split(/[\s-]+/)
-      .filter(Boolean);
-
-    if (wordParts.length > 1) return wordParts.map((p) => p.toUpperCase());
-
-    const lower = cleaned.toLowerCase();
-    const matches = lower.match(
-      /[^aeiouy]*[aeiouy]+(?:[^aeiouy]+(?=[aeiouy]|$))?/g
-    );
-    const syllables = (matches && matches.length ? matches : [cleaned]).map((s) =>
-      s.toUpperCase()
-    );
-
-    return syllables.length ? syllables : [cleaned.toUpperCase()];
-  }
-
-  function bestEffortIpa(name, syllables) {
-    const cleaned = cleanText(name);
-    if (!cleaned) return "";
-
-    const base = (syllables || [])
-      .map((s) => cleanText(s).toLowerCase())
-      .filter(Boolean)
-      .join(".");
-
-    return base ? `ˈ${base}` : `ˈ${cleaned.toLowerCase()}`;
-  }
-
-  function regenerateFromName(nextName) {
-    const nextSyllables = bestEffortSyllables(nextName);
-    const nextIpa = bestEffortIpa(nextName, nextSyllables);
-
-    config = {
-      ...config,
-      name: nextName,
-      syllables: nextSyllables,
-      ipa: nextIpa,
-    };
-  }
-
-  function updateNameFromDom() {
-    const nextName = nameEl ? cleanText(nameEl.textContent) : "";
-    regenerateFromName(nextName);
-  }
-
-  function updateIpaFromDom() {
-    const next = ipaEl ? cleanText(ipaEl.textContent) : "";
-    config = { ...config, ipa: next };
-  }
-
-  function updateGuidanceFromDom() {
-    const next = guidanceEl ? cleanText(guidanceEl.textContent) : "";
-    config = { ...config, guidance: next };
-  }
-
-  function updateSyllableFromDom(index) {
-    const el = syllableEls[index];
-    const next = el ? cleanText(el.textContent).toUpperCase() : "";
-    const nextSyllables = [...config.syllables];
-    nextSyllables[index] = next;
-    config = { ...config, syllables: nextSyllables };
-  }
-
-  function removeSyllable(index) {
-    if (config.syllables.length <= 1) {
-      config = { ...config, syllables: [""] };
-      tick().then(() => syllableEls[0]?.focus());
-      return;
-    }
-
-    const nextSyllables = config.syllables.filter((_, i) => i !== index);
-    config = { ...config, syllables: nextSyllables };
-
-    tick().then(() => {
-      const nextIndex = Math.min(index, nextSyllables.length - 1);
-      syllableEls[nextIndex]?.focus();
-    });
-  }
-
-  function maybeRemoveEmptySyllable(index) {
-    const value = cleanText(config.syllables[index]);
-    if (!value) removeSyllable(index);
-  }
-
-  function addSyllable() {
-    config = { ...config, syllables: [...config.syllables, ""] };
-    tick().then(() => syllableEls[config.syllables.length - 1]?.focus());
-  }
-
-  function onPressEnterOrSpace(event, action) {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      action();
+  async function loadLibrary() {
+    status = 'Loading library...'
+    try {
+      const idx = await fetch(`${LIB_BASE}/index.json`, { cache: 'no-cache' }).then(r => r.json())
+      libraryIndex = idx
+      status = ''
+    } catch (e) {
+      status = `Library load failed. Set VITE_LIBRARY_BASE_URL. (${e?.message || e})`
     }
   }
 
-  function preventEnterNewline(event) {
-    if (event.key === "Enter") event.preventDefault();
+  async function loadCard(cardId) {
+    const card = await fetch(`${LIB_BASE}/cards/${cardId}.json`, { cache: 'no-cache' }).then(r => r.json())
+    return card
   }
 
-  function handleSyllableKeydown(index, event) {
-    preventEnterNewline(event);
+  function normalizeKey(s) {
+    return (s || '').trim().toLowerCase().replace(/[^a-z0-9\-]+/g, '-').replace(/\-+/g, '-').replace(/^\-|\-$/g, '')
+  }
 
-    if (event.key === "Backspace") {
-      const current = cleanText(config.syllables[index]);
-      if (!current) {
-        event.preventDefault();
-        removeSyllable(index);
+  async function updateFromName() {
+    const key = normalizeKey(name)
+    matches = []
+    selectedCard = null
+
+    // search curated library by exact cardId or exact name match
+    if (libraryIndex?.cards?.length) {
+      const exact = libraryIndex.cards.filter(c => c.cardId === key || (c.name || '').toLowerCase() === (name || '').trim().toLowerCase())
+      matches = exact.slice(0, 8)
+
+      if (matches.length) {
+        // show variants below; auto-select first
+        const card = await loadCard(matches[0].cardId)
+        applyCard(card)
+        return
       }
     }
+
+    // fallback generator
+    const gen = generateChipsFromName(name)
+    chips = gen.chips
+    sayAs = gen.sayAs || (name || '').toLowerCase()
+    hint = ''
   }
 
-  function detectVoices() {
-    if (!ttsSupported) return;
+  function applyCard(card) {
+    selectedCard = card
+    name = card.name
+    chips = (card.pronunciation?.chips || []).map(c => ({ label: c.label, speak: c.speak }))
+    sayAs = card.pronunciation?.sayAs || (card.name || '').toLowerCase()
+    hint = card.pronunciation?.hint || ''
+  }
 
+  function refreshSelectedVoice() {
+    selectedVoice = voices.find(v => v.voiceURI === selectedVoiceURI) || null
+  }
+
+  function onPlay() {
+    if (!chips.length) return
+    const payload = buildPayload(chips, sayAs)
     try {
-      const voices = window.speechSynthesis.getVoices() || [];
-      localVoices = voices.filter((v) => v && v.localService === true);
-      voicesLoading = false;
-
-      if (
-        !config.voiceId ||
-        !localVoices.some((v) => v.voiceURI === config.voiceId)
-      ) {
-        config = { ...config, voiceId: localVoices[0]?.voiceURI ?? null };
-      }
-    } catch {
-      voicesLoading = false;
-      voicesError = "Unable to detect voices in this browser.";
+      speak(payload, selectedVoice, { rate: 0.95, pitch: 1.0, volume: 1.0 })
+    } catch (e) {
+      status = `Play failed: ${e?.message || e}`
     }
   }
 
-  function selectVoice(voiceURI) {
-    config = { ...config, voiceId: voiceURI ?? null };
+  function addChip() {
+    chips = [...chips, { label: 'NEW', speak: 'new' }]
   }
 
-  function buildSpokenNameText() {
-    return (config.syllables || []).map(cleanText).filter(Boolean).join(", ");
-  }
-
-  function speakName() {
-    if (!ttsSupported) return;
-
-    const syllableParts = (config.syllables || []).map(cleanText).filter(Boolean);
-    const instructionalText = syllableParts.join(", ");
-    if (!instructionalText) return;
-    const mergedText = syllableParts.join("-");
-    const spokenText = `${instructionalText}. ${mergedText}`;
-
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(spokenText);
-    const voice =
-      localVoices.find((v) => v.voiceURI === config.voiceId) ||
-      (window.speechSynthesis.getVoices() || []).find(
-        (v) => v.voiceURI === config.voiceId
-      );
-    if (voice) utterance.voice = voice;
-
-    lastTtsPayload = {
-      instructionalText,
-      mergedText,
-      spokenText,
-      voiceId: config.voiceId ?? null,
-      resolvedVoice: voice
-        ? {
-            voiceURI: voice.voiceURI,
-            name: voice.name,
-            lang: voice.lang,
-            localService: voice.localService,
-          }
-        : null,
-      utterance: { text: spokenText },
-    };
-
-    window.speechSynthesis.speak(utterance);
-  }
-
-  function saveToDevice() {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ config, ttsPayload: lastTtsPayload })
-      );
-    } catch {
-      // Phase 0: silent failure is acceptable in constrained environments.
+  function exportSubmission() {
+    const cardId = normalizeKey(name)
+    const payload = buildPayload(chips, sayAs)
+    const submission = {
+      schemaVersion: '0.2',
+      cardId,
+      name: name.trim(),
+      pronunciation: { chips, sayAs, hint },
+      tts: { engine: 'web-speech-api', payload, voice: selectedVoice ? {
+        voiceURI: selectedVoice.voiceURI, name: selectedVoice.name, lang: selectedVoice.lang, localService: selectedVoice.localService
+      } : undefined },
+      meta: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), source: 'user-submission' }
     }
+    const blob = new Blob([JSON.stringify(submission, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${cardId}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    status = 'Downloaded submission JSON. Upload it to the Submission Inbox repo (cards/).'
   }
 
-  function loadFromDevice() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object") return;
-
-      const source =
-        parsed.config && typeof parsed.config === "object" ? parsed.config : parsed;
-
-      config = {
-        ...config,
-        name: typeof source.name === "string" ? source.name : config.name,
-        ipa: typeof source.ipa === "string" ? source.ipa : config.ipa,
-        guidance:
-          typeof source.guidance === "string" ? source.guidance : config.guidance,
-        voiceId:
-          typeof source.voiceId === "string" || source.voiceId === null
-            ? source.voiceId
-            : config.voiceId,
-        syllables: Array.isArray(source.syllables)
-          ? source.syllables.map((s) => (typeof s === "string" ? s : "")).slice(0, 12)
-          : config.syllables,
-      };
-    } catch {
-      // Ignore malformed saved state.
+  onMount(async () => {
+    // voices load async in some browsers
+    const loadVoices = () => {
+      voices = listLocalVoices()
+      if (!selectedVoiceURI && voices.length) selectedVoiceURI = voices[0].voiceURI
+      refreshSelectedVoice()
     }
-  }
+    window.speechSynthesis?.addEventListener?.('voiceschanged', loadVoices)
+    loadVoices()
 
-  function voiceRows(voices, perRow = 2) {
-    const rows = [];
-    for (let i = 0; i < voices.length; i += perRow) {
-      rows.push(voices.slice(i, i + perRow));
-    }
-    return rows;
-  }
-
-  onMount(() => {
-    loadFromDevice();
-
-    ttsSupported =
-      typeof window !== "undefined" &&
-      "speechSynthesis" in window &&
-      "SpeechSynthesisUtterance" in window;
-
-    if (!ttsSupported) {
-      voicesLoading = false;
-      voicesError = "Text-to-Speech is not supported in this browser.";
-      return;
-    }
-
-    const handleVoicesChanged = () => detectVoices();
-    window.speechSynthesis.addEventListener("voiceschanged", handleVoicesChanged);
-
-    detectVoices();
-
-    onDestroy(() => {
-      window.speechSynthesis.removeEventListener(
-        "voiceschanged",
-        handleVoicesChanged
-      );
-      window.speechSynthesis.cancel();
-    });
-  });
+    if (LIB_BASE) await loadLibrary()
+    await updateFromName()
+  })
 </script>
 
-<main class="frame">
-  <h1>pronounce/name</h1>
+<style>
+  :global(body){ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:#0b2b33; color:#e8f2f4;}
+  .wrap{max-width:980px;margin:0 auto;padding:24px; display:grid; gap:24px; grid-template-columns: 1fr 380px;}
+  .card{background:#0f3b45;border-radius:18px;padding:18px; box-shadow: 0 10px 30px rgba(0,0,0,.25);}
+  .title{font-size:34px; font-weight:800; color:#42d1c5; letter-spacing:-0.02em;}
+  .sub{opacity:.85; line-height:1.4}
+  .builder{background:#1a8ea2;border-radius:22px;padding:18px;}
+  .name{font-size:26px; font-weight:800; text-align:center; margin:4px 0 12px;}
+  .chips{display:flex; gap:10px; justify-content:center; flex-wrap:wrap;}
+  .chip{background:#f5f1de; color:#07343c; border-radius:999px; padding:8px 12px; display:flex; gap:8px; align-items:center;}
+  .chip input{width:72px; border:none; outline:none; background:transparent; font-weight:800; text-transform:uppercase;}
+  .chip small{opacity:.7}
+  .hint{background:#f5f1de; color:#07343c; border-radius:999px; padding:8px 12px; margin:10px auto 0; max-width:320px; text-align:center;}
+  .bar{background:#08313a;border-radius:999px;padding:10px 12px; text-align:center; font-weight:800; margin:12px 0;}
+  .voices{display:grid; gap:10px;}
+  select{width:100%; padding:10px 12px; border-radius:12px; border:none;}
+  button{border:none;border-radius:999px;padding:12px 14px;font-weight:800; cursor:pointer;}
+  .row{display:flex; gap:10px; justify-content:center; flex-wrap:wrap;}
+  .btn-red{background:#df2b6d;color:white}
+  .btn-green{background:#20c997;color:#08313a}
+  .btn-yellow{background:#ffd43b;color:#08313a}
+  .btn-teal{background:#21d4c6;color:#08313a}
+  .status{margin-top:10px; opacity:.9; font-size:13px;}
+  .variants{display:grid; gap:10px;}
+  .variant{background:#0c3640;border-radius:16px;padding:12px;}
+  .variant h4{margin:0 0 6px 0}
+  .variant .mini{display:flex; gap:8px; flex-wrap:wrap}
+  .mini span{background:#f5f1de; color:#07343c; border-radius:999px; padding:4px 8px; font-weight:800; font-size:12px;}
+</style>
 
-  <div class="pill-row">
-    <div
-      class="pill primary"
-      bind:this={nameEl}
-      contenteditable="true"
-      role="textbox"
-      aria-label="Name"
-      tabindex="0"
-      spellcheck="false"
-      on:keydown={preventEnterNewline}
-      on:input={updateNameFromDom}
-    >
-      {config.name}
+<div class="wrap">
+  <div>
+    <div class="card">
+      <div class="title">Name/builder</div>
+      <p class="sub">
+        Type a name. If it exists in the curated library, variants appear below. Otherwise, we generate teaching chips you can edit.
+      </p>
+      {#if status}<div class="status">{status}</div>{/if}
     </div>
-    <div class="pill secondary">
-      /
-      <span
-        bind:this={ipaEl}
-        contenteditable="true"
-        role="textbox"
-        aria-label="IPA"
-        tabindex="0"
-        spellcheck="false"
-        on:keydown={preventEnterNewline}
-        on:input={updateIpaFromDom}
-        >{config.ipa}</span
-      >/
-    </div>
-  </div>
 
-  <div class="syllable-row">
-    {#each config.syllables as s, i}
-      <div
-        class="syllable"
-        use:setSyllableEl={i}
-        contenteditable="true"
-        role="textbox"
-        aria-label="Syllable"
-        tabindex="0"
-        spellcheck="false"
-        on:keydown={(e) => handleSyllableKeydown(i, e)}
-        on:input={() => updateSyllableFromDom(i)}
-        on:blur={() => maybeRemoveEmptySyllable(i)}
-      >
-        {s}
+    <div class="card" style="margin-top:16px;">
+      <div style="display:flex; gap:10px; align-items:center;">
+        <input style="flex:1; padding:12px 14px; border-radius:14px; border:none;" bind:value={name} placeholder="Type your name..." on:input={() => updateFromName()} />
+        <button class="btn-teal" on:click={updateFromName}>Update</button>
       </div>
-    {/each}
-    <div
-      class="syllable add"
-      role="button"
-      tabindex="0"
-      aria-label="Add syllable"
-      on:click={addSyllable}
-      on:keydown={(e) => onPressEnterOrSpace(e, addSyllable)}
-    >
-      +
-    </div>
-  </div>
+      <div class="status">Natural: <b>{sayAs}</b></div>
 
-  <div class="card">
-    <h2>{config.name}</h2>
-    <div class="syllable-row center">
-      {#each config.syllables as s}
-        <div class="syllable">{s}</div>
-      {/each}
-    </div>
-    <div
-      class="guide"
-      bind:this={guidanceEl}
-      contenteditable="true"
-      role="textbox"
-      aria-label="Sounds like"
-      tabindex="0"
-      spellcheck="false"
-      on:keydown={preventEnterNewline}
-      on:input={updateGuidanceFromDom}
-    >
-      {config.guidance}
-    </div>
-    <p class="listen">
-      listen at <strong>tru.ca/pronounce</strong>
-      <button
-        type="button"
-        aria-label="Play name"
-        on:click={speakName}
-        on:keydown={(e) => onPressEnterOrSpace(e, speakName)}
-        style="background:transparent;border:0;padding:0;margin-left:.35rem;cursor:pointer;line-height:1;"
-      >
-        <img
-          src={playIconUrl}
-          alt="Play"
-          style="width:1em;height:1em;vertical-align:-0.15em;display:inline-block;"
-        />
-      </button>
-    </p>
-  </div>
-
-  <div
-    class="accordion"
-    role="button"
-    tabindex="0"
-    aria-expanded={localVoicesOpen}
-    on:click={() => (localVoicesOpen = !localVoicesOpen)}
-    on:keydown={(e) =>
-      onPressEnterOrSpace(e, () => (localVoicesOpen = !localVoicesOpen))}
-  >
-    Detected Local Voice Models ▾
-  </div>
-  {#if localVoicesOpen}
-    {#if voicesError}
-      <div class="syllable-row">
-        <div class="syllable add">{voicesError}</div>
-      </div>
-    {:else if voicesLoading}
-      <div class="syllable-row">
-        <div class="syllable add">Detecting voices…</div>
-      </div>
-    {:else if localVoices.length === 0}
-      <div class="syllable-row">
-        <div class="syllable add">No local voices detected.</div>
-      </div>
-    {:else}
-      {#each voiceRows(localVoices) as row}
-        <div class="syllable-row">
-          {#each row as v (v.voiceURI)}
-            <div
-              class="syllable"
-              class:add={v.voiceURI === config.voiceId}
-              role="button"
-              tabindex="0"
-              aria-label="Select voice"
-              on:click={() => selectVoice(v.voiceURI)}
-              on:keydown={(e) =>
-                onPressEnterOrSpace(e, () => selectVoice(v.voiceURI))}
-              title={`${v.name} (${v.lang})`}
-            >
-              {v.name}
+      {#if matches.length}
+        <div class="bar">Library Variants</div>
+        <div class="variants">
+          {#each matches as m}
+            <div class="variant">
+              <h4>{m.name}</h4>
+              <button class="btn-yellow" on:click={async ()=> applyCard(await loadCard(m.cardId))}>Use {m.cardId}</button>
             </div>
           {/each}
         </div>
-      {/each}
-    {/if}
-  {/if}
-
-  <div class="accordion">Cloud Models ▾</div>
-  <div class="accordion">Add your voice ▾</div>
-
-  <div class="actions">
-    <button on:click={saveToDevice}>save on device</button>
-    <button>iframe</button>
-    <button class="ghost">submit to library</button>
+      {/if}
+    </div>
   </div>
 
-  <footer>
-    made by the<br />
-    <strong>2025–2026 Intercultural Ambassador Team</strong>
-  </footer>
-</main>
+  <div class="builder">
+    <div class="name">{name}</div>
 
-<style>
-  .frame {
-    width: 390px;
-    background: white;
-    padding: 1.5rem;
-    border-radius: 12px;
-    text-align: center;
-  }
+    <div class="chips">
+      {#each chips as c, i}
+        <div class="chip">
+          <input bind:value={c.label} on:input={(e)=>{ chips[i].label = e.target.value.toUpperCase(); chips = [...chips] }} />
+          <small>→</small>
+          <input style="width:90px; text-transform:none; font-weight:700;" bind:value={c.speak} on:input={(e)=>{ chips[i].speak = e.target.value.toLowerCase(); chips = [...chips] }} />
+        </div>
+      {/each}
+      <button class="btn-yellow" on:click={addChip}>+</button>
+    </div>
 
-  h1 {
-    color: var(--bg);
-    margin-bottom: 1rem;
-  }
+    {#if hint}
+      <div class="hint">{hint}</div>
+    {/if}
 
-  .pill-row {
-    display: flex;
-    gap: .5rem;
-    justify-content: center;
-    margin-bottom: .75rem;
-  }
+    <div class="bar">Detected Local Voice Models</div>
+    <select bind:value={selectedVoiceURI} on:change={refreshSelectedVoice}>
+      {#each voices as v}
+        <option value={v.voiceURI}>{v.name} — {v.lang}</option>
+      {/each}
+    </select>
 
-  .pill {
-    padding: .5rem 1rem;
-    border-radius: 999px;
-    font-weight: 500;
-  }
+    <div class="bar">Add Your Voice</div>
+    <div class="row">
+      <button class="btn-red" disabled>Record</button>
+      <button class="btn-green" on:click={onPlay}>Play</button>
+      <button class="btn-yellow" disabled>Save</button>
+    </div>
 
-  .primary {
-    background: var(--accent);
-    color: white;
-  }
+    <div class="row" style="margin-top:12px;">
+      <button class="btn-teal" on:click={exportSubmission}>Save Name</button>
+      <button class="btn-green" on:click={exportSubmission}>Add to library</button>
+    </div>
 
-  .secondary {
-    background: var(--bg-dark);
-    color: white;
-  }
-
-  .syllable-row {
-    display: flex;
-    justify-content: center;
-    gap: .5rem;
-    margin-bottom: 1rem;
-  }
-
-  .syllable {
-    background: var(--accent);
-    color: white;
-    padding: .5rem 1rem;
-    border-radius: 999px;
-    font-size: .9rem;
-  }
-
-  .syllable.add {
-    background: var(--bg-dark);
-  }
-
-  .card {
-    background: var(--bg);
-    color: white;
-    border-radius: 16px;
-    padding: 1rem;
-    margin-bottom: 1rem;
-  }
-
-  .card h2 {
-    margin-top: 0;
-  }
-
-  .center {
-    justify-content: center;
-  }
-
-  .guide {
-    margin: .75rem 0 .25rem;
-  }
-
-  .listen {
-    font-size: .85rem;
-    opacity: .9;
-  }
-
-  .accordion {
-    background: var(--bg-dark);
-    color: white;
-    padding: .75rem;
-    border-radius: 999px;
-    margin-bottom: .5rem;
-    font-size: .9rem;
-  }
-
-  .actions {
-    display: flex;
-    justify-content: space-between;
-    gap: .5rem;
-    margin: 1rem 0;
-  }
-
-  button {
-    flex: 1;
-    background: var(--accent);
-    color: white;
-    border: none;
-    border-radius: 999px;
-    padding: .6rem;
-    font-size: .85rem;
-  }
-
-  button.ghost {
-    background: var(--accent-soft);
-  }
-
-  footer {
-    font-size: .75rem;
-    color: #555;
-  }
-</style>
+    <div class="status">
+      Tip: edit the right-hand "speak" values to avoid letter spelling (e.g., ER → ur; L → luh).
+    </div>
+  </div>
+</div>
