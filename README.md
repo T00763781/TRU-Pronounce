@@ -1,28 +1,14 @@
-# TRU-Pronounce Runtime (Svelte)
+# TRU Pronounce (Runtime)
 
-Public-facing app to build and play Name Cards.
+Vite + Svelte runtime application for TRU Pronounce.
 
-## What it does
-- Loads the curated Runtime Library (`index.json`, `cards/*.json`)
-- Lets users search for existing names and variants
-- Lets users build/edit pronunciation chips and play with Web Speech API
-- Exports a submission package (JSON + optional audio) for upload to the Submission Inbox
+## Local development
 
-## Configure library URL
+- Install: `npm install`
+- Dev: `npm run dev`
+- Build: `npm run build`
 
-Set `VITE_LIBRARY_BASE_URL` to where your Runtime Library is hosted.
-Examples:
-- GitHub raw: `https://raw.githubusercontent.com/<ORG>/<REPO>/main`
-- GitHub Pages: `https://<org>.github.io/<repo>`
+## Deployment
 
-Copy `.env.example` to `.env.local`.
-
-## Run locally
-```bash
-npm install
-npm run dev
-```
-
-## Deploy (GitHub Pages)
-This is a Vite app. Build and deploy `dist/` to GitHub Pages.
+GitHub Actions deploys `dist/` to GitHub Pages on push to `main`.
 
